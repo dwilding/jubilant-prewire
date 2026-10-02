@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from . import _charmhub, _containerd
 
 logger = logging.getLogger("prewire")
+
+# Worker threads for bundle pulls. Pulls are subprocess- and network-bound, so
+# threads release the GIL while waiting. Four workers balance speed against
+# saturating the runner's bandwidth; CI runners have ~4 vCPUs.
+_PULL_WORKERS = 4
 
 # Charms already pre-pulled this session, keyed by (charm, channel). The
 # channel matters: a deploy on a different channel may use a different image.
@@ -151,7 +157,13 @@ def _discover() -> bool:
 
 
 def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
-    """Pre-pull the OCI images for every charm in a bundle."""
+    """Pre-pull the OCI images for every charm in a bundle.
+
+    The charms are pulled in parallel: a bundle's images are independent,
+    and sequential pulls dominated job runtime in CI validation (the 8
+    cos-lite images took 714s of a 1714s job).
+    """
+    global _elapsed
     if not info.bundle_yaml:
         logger.warning("bundle %s has no bundle-yaml; skipping", bundle)
         return
@@ -162,6 +174,9 @@ def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
         len(charms),
         [(ref.name, ref.channel) for ref in charms],
     )
+    # Dedup and mark as warmed in the main thread so the same charm is never
+    # submitted twice; workers do not touch _warmed.
+    pending = []
     for ref in charms:
         key = (ref.name, ref.channel)
         if key in _warmed:
@@ -172,16 +187,44 @@ def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
                 ref.channel,
             )
             continue
-        try:
-            charm_info = _charmhub.get_charm_info(ref.name, ref.channel)
-            pulled = _pull_charm_images(charm_info, _ctr, _socket)
-            logger.info("bundle %s: pulled %d image(s) for %s", bundle, pulled, ref.name)
-            if pulled:
-                _bundle_pulls.append((bundle, charm_info.name, ref.channel, pulled))
-        except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
-            logger.warning("bundle %s: failed to pre-pull %s: %s", bundle, ref.name, exc)
-        finally:
-            _warmed.add(key)
+        _warmed.add(key)
+        pending.append(ref)
+    if not pending:
+        return
+    start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=_PULL_WORKERS) as pool:
+        futures = {pool.submit(_pull_bundle_charm, ref): ref for ref in pending}
+        for future in as_completed(futures):
+            ref = futures[future]
+            try:
+                charm_name, pulled = future.result()
+                if pulled:
+                    _bundle_pulls.append((bundle, charm_name, ref.channel, pulled))
+            except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
+                logger.warning("bundle %s: failed to pre-pull %s: %s", bundle, ref.name, exc)
+    # Add the bundle's wall time once; per-charm elapsed times overlap when
+    # pulled in parallel, so summing them would double-count.
+    _elapsed += time.monotonic() - start
+    logger.info(
+        "bundle %s: %d charm(s) pulled in %.1fs",
+        bundle,
+        len(pending),
+        time.monotonic() - start,
+    )
+
+
+def _pull_bundle_charm(ref: _charmhub.CharmRef) -> tuple[str, int]:
+    """Fetch info for and pull one bundle charm; return (name, pulled).
+
+    Runs on a worker thread; must not touch module-level mutable state.
+    """
+    start = time.monotonic()
+    charm_info = _charmhub.get_charm_info(ref.name, ref.channel)
+    pulled = _pull_charm_images(charm_info, _ctr, _socket)
+    logger.info(
+        "bundle: pulled %d image(s) for %s in %.1fs", pulled, ref.name, time.monotonic() - start
+    )
+    return charm_info.name, pulled
 
 
 def _pull_charm_images(info: _charmhub.CharmInfo, ctr: str | None, socket: str | None) -> int:
