@@ -39,11 +39,6 @@ _PULL_RETRY_DELAY = 15
 # quickly; a dead socket burns the whole timeout.
 _PROBE_TIMEOUT = 10
 
-# Set to True during socket discovery when the responsive socket is only
-# reachable via sudo (root:root sockets on dev VMs; CI runners run as root
-# and never hit this). All subsequent ctr invocations then go through sudo.
-_use_sudo = False
-
 
 def find_ctr() -> str | None:
     """Find the ctr binary: k8s snap path first, then PATH."""
@@ -54,46 +49,31 @@ def find_ctr() -> str | None:
 
 
 def find_socket(ctr: str) -> str | None:
-    """Probe candidate sockets and return the first that responds.
+    """Probe candidate sockets via sudo and return the first that responds.
 
-    If no socket responds directly (common on dev VMs where the socket is
-    root-only), the probe is retried via ``sudo -n``; when that works, all
-    subsequent ctr invocations use sudo too.
+    The containerd socket is root-only in every supported environment
+    (GitHub Actions runners, Multipass, and LXD VMs all run tests as a
+    non-root user), so all probes and pulls go through ``sudo -n``.
     """
-    global _use_sudo
+    if shutil.which("sudo") is None:
+        logger.warning("socket: sudo not found; skipping image pre-pulls")
+        return None
     for candidate in _SOCKET_CANDIDATES:
         if not Path(candidate).exists():
             logger.debug("socket: %s does not exist", candidate)
             continue
-        logger.debug("socket: probing %s (direct)", candidate)
-        if _probe(ctr, candidate):
-            logger.debug("socket: %s responds (direct)", candidate)
-            return candidate
-        logger.debug("socket: %s did not respond (direct)", candidate)
-    # Direct access failed everywhere. If passwordless sudo is available,
-    # retry the probe with it — CI runners and dev VMs run tests as a
-    # non-root user, and the containerd socket is typically root-only.
-    if shutil.which("sudo") is None:
-        logger.warning("socket: no candidate responded and sudo is not available")
-        return None
-    for candidate in _SOCKET_CANDIDATES:
-        if not Path(candidate).exists():
-            continue
         logger.debug("socket: probing %s (sudo)", candidate)
-        if _probe(ctr, candidate, sudo=True):
-            _use_sudo = True
+        if _probe(ctr, candidate):
             logger.info("socket: %s responds via sudo; using sudo for ctr", candidate)
             return candidate
         logger.debug("socket: %s did not respond (sudo)", candidate)
-    logger.warning("socket: no candidate responded directly or via sudo")
+    logger.warning("socket: no candidate responded via sudo")
     return None
 
 
-def _probe(ctr: str, socket: str, sudo: bool = False) -> bool:
-    """Run a `ctr version` probe against *socket*; True if it responds."""
-    command = [ctr, "--address", socket, "-n", NAMESPACE, "version"]
-    if sudo:
-        command = ["sudo", "-n", "--", *command]
+def _probe(ctr: str, socket: str) -> bool:
+    """Run a `ctr version` probe against *socket* via sudo; True if it responds."""
+    command = ["sudo", "-n", "--", ctr, "--address", socket, "-n", NAMESPACE, "version"]
     try:
         result = subprocess.run(
             command,
@@ -122,10 +102,13 @@ def pull_image(image: str, username: str, password: str, ctr: str, socket: str) 
 
     Returns True if the pull succeeded. The k8s snap's ctr does not support
     ``--auth-file`` ("flag provided but not defined"), so credentials are
-    passed with ``--user``. When socket discovery needed sudo, the pull runs
-    via sudo too.
+    passed with ``--user``. The pull runs via ``sudo -n`` because the
+    containerd socket is root-only in every supported environment.
     """
     command = [
+        "sudo",
+        "-n",
+        "--",
         ctr,
         "--address",
         socket,
@@ -137,8 +120,6 @@ def pull_image(image: str, username: str, password: str, ctr: str, socket: str) 
         f"{username}:{password}",
         image,
     ]
-    if _use_sudo:
-        command = ["sudo", "-n", "--", *command]
     # Log the command with the credentials redacted: the password is a
     # short-lived Charmhub macaroon, but it still shouldn't appear in logs.
     redacted = list(command)

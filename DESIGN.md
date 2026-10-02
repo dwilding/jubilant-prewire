@@ -71,7 +71,7 @@ jubilant-prewire assumes concierge has set up the K8s environment.
 
 For each candidate, check that the socket exists and that `ctr --address {candidate} -n k8s.io version` succeeds. A socket that exists but does not respond is worse than no socket at all: `ctr` hangs until its context deadline instead of failing fast.
 
-If no candidate responds directly, retry the probe via `sudo -n` (passwordless sudo). The containerd socket is typically `root:root` with mode `srw-rw----`, so a non-root test user gets permission denied — but the same socket responds fine under sudo. When the sudo probe works, all subsequent `ctr` invocations (including image pulls) go through sudo. This path is hit almost everywhere: GitHub Actions runners run tests as the non-root `runner` user, and dev VMs run as a non-root user too. Without the fallback, jubilant-prewire silently skips all pulls.
+All probes and pulls go through `sudo -n` (passwordless sudo). The containerd socket is `root:root` with mode `srw-rw----` in every supported environment — GitHub Actions runners, Multipass, and LXD VMs all run tests as a non-root user — so a direct probe gets permission denied everywhere that matters. Root environments (e.g. containers without sudo) are not supported. If sudo is unavailable or no candidate responds, print a warning and skip all pulls.
 
 If no candidate responds even via sudo, print a warning and skip all pulls.
 

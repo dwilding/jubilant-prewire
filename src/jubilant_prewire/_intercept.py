@@ -151,7 +151,7 @@ def _discover() -> bool:
     if _socket is None:
         logger.warning("no responsive containerd socket; skipping image pre-pulls")
         return False
-    logger.info("using ctr %s, socket %s (sudo=%s)", _ctr, _socket, _containerd._use_sudo)
+    logger.info("using ctr %s, socket %s (via sudo)", _ctr, _socket)
     return True
 
 
