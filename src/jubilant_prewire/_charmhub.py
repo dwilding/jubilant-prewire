@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import urllib.error
 import urllib.parse
@@ -10,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 
 import yaml
+
+logger = logging.getLogger("prewire")
 
 CHARMHUB_API = "https://api.charmhub.io"
 
@@ -126,6 +129,14 @@ def _get_json(url: str) -> dict:
             # HTTPError covers bad HTTP status lines; ValueError covers a
             # truncated body that fails JSON parsing.
             last_error = exc
+            logger.warning(
+                "charmhub: GET attempt %d/%d failed (%s: %s); url=%s",
+                attempt,
+                _HTTP_ATTEMPTS,
+                type(exc).__name__,
+                exc,
+                url,
+            )
             if attempt < _HTTP_ATTEMPTS:
                 time.sleep(_HTTP_RETRY_DELAY)
     assert last_error is not None

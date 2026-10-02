@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any
 
 from . import _charmhub, _containerd
+
+logger = logging.getLogger("prewire")
 
 # Charms already pre-pulled this session, keyed by (charm, channel). The
 # channel matters: a deploy on a different channel may use a different image.
@@ -44,18 +47,30 @@ def classify(charm: object) -> str | None:
     starting with ``.`` or ``/`` as local files).
     """
     if isinstance(charm, Path):
+        logger.info("classify: %r is a pathlib.Path -> local charm, skipping", charm)
         return None
     if not isinstance(charm, str) or not charm:
+        logger.info("classify: %r is not a non-empty string -> skipping", charm)
         return None
     if charm.startswith(("./", "/")):
+        logger.info("classify: %r starts with ./ or / -> local charm, skipping", charm)
         return None
     if charm.startswith("ch:"):
-        return charm[3:]
+        name = charm[3:]
+        logger.info("classify: %r has ch: prefix -> Charmhub charm %r", charm, name)
+        return name
+    logger.info("classify: %r -> Charmhub charm", charm)
     return charm
 
 
 def _patched_deploy(self, charm, app=None, **kwargs):
     """Pre-pull OCI images for *charm* before the real deploy runs."""
+    logger.info(
+        "intercepted deploy(charm=%r, app=%r, kwargs=%s)",
+        charm,
+        app,
+        ", ".join(f"{k}={v!r}" for k, v in kwargs.items()) or "{}",
+    )
     try:
         _warm(charm, kwargs.get("channel"))
     except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
@@ -77,24 +92,38 @@ def _warm(charm: object, channel: str | None) -> None:
         return
     key = (name, channel)
     if key in _warmed:
+        logger.info("warm: %s (channel=%r) already warmed, skipping", name, channel)
         return
 
+    logger.info("warm: pre-pulling %s (channel=%r)", name, channel)
     start = time.monotonic()
     try:
         if not _discover():
+            logger.info("warm: discovery failed, skipping %s", name)
             return
         info = _charmhub.get_charm_info(name, channel)
+        logger.info(
+            "warm: charm info for %s: id=%s type=%s channel=%r resources=%s",
+            name,
+            info.id,
+            info.type,
+            info.channel,
+            [(r.get("name"), r.get("type"), r.get("revision")) for r in info.resources],
+        )
         if info.type == "bundle":
             _warm_bundle(name, info)
         else:
             pulled = _pull_charm_images(info, _ctr, _socket)
+            logger.info("warm: pulled %d image(s) for %s", pulled, name)
             if pulled:
                 _pulls.append((info.name, channel, pulled))
     except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
-        print(f"prewire: failed to pre-pull {name}: {exc}")
+        logger.warning("warm: failed to pre-pull %s: %s", name, exc)
     finally:
-        _elapsed += time.monotonic() - start
+        elapsed = time.monotonic() - start
+        _elapsed += elapsed
         _warmed.add(key)
+        logger.info("warm: %s done in %.1fs (total prewire time: %.1fs)", name, elapsed, _elapsed)
 
 
 def _discover() -> bool:
@@ -106,34 +135,51 @@ def _discover() -> bool:
     if _discovered:
         return _ctr is not None and _socket is not None
     _discovered = True
+    logger.info("discover: finding ctr binary (candidates: %s)", _containerd._CTR_CANDIDATES)
     _ctr = _containerd.find_ctr()
     if _ctr is None:
-        print("prewire: ctr not found; skipping image pre-pulls")
+        logger.warning("discover: ctr not found; skipping image pre-pulls")
         return False
+    logger.info("discover: found ctr at %s", _ctr)
+    logger.info("discover: probing sockets (candidates: %s)", _containerd._SOCKET_CANDIDATES)
     _socket = _containerd.find_socket(_ctr)
     if _socket is None:
-        print("prewire: no responsive containerd socket; skipping image pre-pulls")
+        logger.warning("discover: no responsive containerd socket; skipping image pre-pulls")
         return False
+    logger.info("discover: using socket %s (sudo=%s)", _socket, _containerd._use_sudo)
     return True
 
 
 def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
     """Pre-pull the OCI images for every charm in a bundle."""
     if not info.bundle_yaml:
-        print(f"prewire: bundle {bundle} has no bundle-yaml; skipping")
+        logger.warning("bundle %s has no bundle-yaml; skipping", bundle)
         return
     charms = _charmhub.get_bundle_charms(info.bundle_yaml)
+    logger.info(
+        "bundle %s: %d charm(s): %s",
+        bundle,
+        len(charms),
+        [(ref.name, ref.channel) for ref in charms],
+    )
     for ref in charms:
         key = (ref.name, ref.channel)
         if key in _warmed:
+            logger.info(
+                "bundle %s: %s (channel=%r) already warmed, skipping",
+                bundle,
+                ref.name,
+                ref.channel,
+            )
             continue
         try:
             charm_info = _charmhub.get_charm_info(ref.name, ref.channel)
             pulled = _pull_charm_images(charm_info, _ctr, _socket)
+            logger.info("bundle %s: pulled %d image(s) for %s", bundle, pulled, ref.name)
             if pulled:
                 _bundle_pulls.append((bundle, charm_info.name, ref.channel, pulled))
         except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
-            print(f"prewire: failed to pre-pull {ref.name}: {exc}")
+            logger.warning("bundle %s: failed to pre-pull %s: %s", bundle, ref.name, exc)
         finally:
             _warmed.add(key)
 
@@ -145,22 +191,46 @@ def _pull_charm_images(info: _charmhub.CharmInfo, ctr: str | None, socket: str |
     pulled = 0
     for resource in info.resources:
         if resource.get("type") != "oci-image":
+            logger.info(
+                "pull: skipping resource %s/%s (type=%r, not oci-image)",
+                info.name,
+                resource.get("name"),
+                resource.get("type"),
+            )
             continue
         resource_name = resource.get("name")
         revision = resource.get("revision")
         if not isinstance(resource_name, str) or not isinstance(revision, int):
+            logger.warning(
+                "pull: skipping malformed resource %s/%s (name=%r revision=%r)",
+                info.name,
+                resource_name,
+                resource_name,
+                revision,
+            )
             continue
         try:
             manifest = _charmhub.get_oci_image_manifest(info.id, resource_name, revision)
         except Exception as exc:  # noqa: BLE001 -- best-effort: skip this resource
-            print(f"prewire: failed to get image manifest for {info.name}/{resource_name}: {exc}")
+            logger.warning(
+                "pull: failed to get image manifest for %s/%s: %s", info.name, resource_name, exc
+            )
             continue
+        logger.info(
+            "pull: %s/%s (rev %d) -> %s",
+            info.name,
+            resource_name,
+            revision,
+            manifest.image_name,
+        )
+        start = time.monotonic()
         if _containerd.pull_image(
             manifest.image_name, manifest.username, manifest.password, ctr, socket
         ):
             pulled += 1
+            logger.info("pull: %s done in %.1fs", manifest.image_name, time.monotonic() - start)
         else:
-            print(f"prewire: failed to pull image for {info.name}/{resource_name}")
+            logger.warning("pull: failed to pull image for %s/%s", info.name, resource_name)
     return pulled
 
 
