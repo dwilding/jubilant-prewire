@@ -63,28 +63,28 @@ def find_socket(ctr: str) -> str | None:
     global _use_sudo
     for candidate in _SOCKET_CANDIDATES:
         if not Path(candidate).exists():
-            logger.info("socket: %s does not exist", candidate)
+            logger.debug("socket: %s does not exist", candidate)
             continue
-        logger.info("socket: probing %s (direct)", candidate)
+        logger.debug("socket: probing %s (direct)", candidate)
         if _probe(ctr, candidate):
-            logger.info("socket: %s responds (direct)", candidate)
+            logger.debug("socket: %s responds (direct)", candidate)
             return candidate
-        logger.info("socket: %s did not respond (direct)", candidate)
+        logger.debug("socket: %s did not respond (direct)", candidate)
     # Direct access failed everywhere. If passwordless sudo is available,
-    # retry the probe with it — CI runners run as root and never get here,
-    # but dev VMs typically have root-only sockets and passwordless sudo.
+    # retry the probe with it — CI runners and dev VMs run tests as a
+    # non-root user, and the containerd socket is typically root-only.
     if shutil.which("sudo") is None:
         logger.warning("socket: no candidate responded and sudo is not available")
         return None
     for candidate in _SOCKET_CANDIDATES:
         if not Path(candidate).exists():
             continue
-        logger.info("socket: probing %s (sudo)", candidate)
+        logger.debug("socket: probing %s (sudo)", candidate)
         if _probe(ctr, candidate, sudo=True):
             _use_sudo = True
             logger.info("socket: %s responds via sudo; using sudo for ctr", candidate)
             return candidate
-        logger.info("socket: %s did not respond (sudo)", candidate)
+        logger.debug("socket: %s did not respond (sudo)", candidate)
     logger.warning("socket: no candidate responded directly or via sudo")
     return None
 
@@ -105,10 +105,10 @@ def _probe(ctr: str, socket: str, sudo: bool = False) -> bool:
         # A socket that exists but does not respond is worse than no
         # socket at all: ctr hangs until its context deadline instead of
         # failing fast. Treat it as absent and try the next candidate.
-        logger.info("socket: probe of %s raised %s", socket, type(exc).__name__)
+        logger.debug("socket: probe of %s raised %s", socket, type(exc).__name__)
         return False
     if result.returncode != 0:
-        logger.info(
+        logger.debug(
             "socket: probe of %s failed (rc=%d): %s",
             socket,
             result.returncode,
@@ -144,7 +144,7 @@ def pull_image(image: str, username: str, password: str, ctr: str, socket: str) 
     redacted = list(command)
     if "--user" in redacted:
         redacted[redacted.index("--user") + 1] = "<credentials>"
-    logger.info("ctr: running %s", " ".join(redacted))
+    logger.debug("ctr: running %s", " ".join(redacted))
     for attempt in range(1, _PULL_ATTEMPTS + 1):
         try:
             result = subprocess.run(command, capture_output=True, check=False)

@@ -71,7 +71,7 @@ def classify(charm: object) -> str | None:
 
 def _patched_deploy(self, charm, app=None, **kwargs):
     """Pre-pull OCI images for *charm* before the real deploy runs."""
-    logger.info(
+    logger.debug(
         "intercepted deploy(charm=%r, app=%r, kwargs=%s)",
         charm,
         app,
@@ -98,18 +98,17 @@ def _warm(charm: object, channel: str | None) -> None:
         return
     key = (name, channel)
     if key in _warmed:
-        logger.info("warm: %s (channel=%r) already warmed, skipping", name, channel)
+        logger.debug("warm: %s (channel=%r) already warmed, skipping", name, channel)
         return
 
-    logger.info("warm: pre-pulling %s (channel=%r)", name, channel)
+    logger.info("pre-pulling %s (channel=%r)", name, channel)
     start = time.monotonic()
     try:
         if not _discover():
-            logger.info("warm: discovery failed, skipping %s", name)
             return
         info = _charmhub.get_charm_info(name, channel)
-        logger.info(
-            "warm: charm info for %s: id=%s type=%s channel=%r resources=%s",
+        logger.debug(
+            "charm info for %s: id=%s type=%s channel=%r resources=%s",
             name,
             info.id,
             info.type,
@@ -120,16 +119,16 @@ def _warm(charm: object, channel: str | None) -> None:
             _warm_bundle(name, info)
         else:
             pulled = _pull_charm_images(info, _ctr, _socket)
-            logger.info("warm: pulled %d image(s) for %s", pulled, name)
+            logger.info("pulled %d image(s) for %s", pulled, name)
             if pulled:
                 _pulls.append((info.name, channel, pulled))
     except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
-        logger.warning("warm: failed to pre-pull %s: %s", name, exc)
+        logger.warning("failed to pre-pull %s: %s", name, exc)
     finally:
         elapsed = time.monotonic() - start
         _elapsed += elapsed
         _warmed.add(key)
-        logger.info("warm: %s done in %.1fs (total prewire time: %.1fs)", name, elapsed, _elapsed)
+        logger.info("pre-pull of %s done in %.1fs", name, elapsed)
 
 
 def _discover() -> bool:
@@ -141,18 +140,18 @@ def _discover() -> bool:
     if _discovered:
         return _ctr is not None and _socket is not None
     _discovered = True
-    logger.info("discover: finding ctr binary (candidates: %s)", _containerd._CTR_CANDIDATES)
+    logger.debug("discover: finding ctr binary (candidates: %s)", _containerd._CTR_CANDIDATES)
     _ctr = _containerd.find_ctr()
     if _ctr is None:
-        logger.warning("discover: ctr not found; skipping image pre-pulls")
+        logger.warning("ctr not found; skipping image pre-pulls")
         return False
-    logger.info("discover: found ctr at %s", _ctr)
-    logger.info("discover: probing sockets (candidates: %s)", _containerd._SOCKET_CANDIDATES)
+    logger.debug("discover: found ctr at %s", _ctr)
+    logger.debug("discover: probing sockets (candidates: %s)", _containerd._SOCKET_CANDIDATES)
     _socket = _containerd.find_socket(_ctr)
     if _socket is None:
-        logger.warning("discover: no responsive containerd socket; skipping image pre-pulls")
+        logger.warning("no responsive containerd socket; skipping image pre-pulls")
         return False
-    logger.info("discover: using socket %s (sudo=%s)", _socket, _containerd._use_sudo)
+    logger.info("using ctr %s, socket %s (sudo=%s)", _ctr, _socket, _containerd._use_sudo)
     return True
 
 
@@ -180,7 +179,7 @@ def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
     for ref in charms:
         key = (ref.name, ref.channel)
         if key in _warmed:
-            logger.info(
+            logger.debug(
                 "bundle %s: %s (channel=%r) already warmed, skipping",
                 bundle,
                 ref.name,
@@ -260,7 +259,7 @@ def _pull_charm_images(info: _charmhub.CharmInfo, ctr: str | None, socket: str |
             )
             continue
         logger.info(
-            "pull: %s/%s (rev %d) -> %s",
+            "pulling %s/%s (rev %d) -> %s",
             info.name,
             resource_name,
             revision,
@@ -271,9 +270,9 @@ def _pull_charm_images(info: _charmhub.CharmInfo, ctr: str | None, socket: str |
             manifest.image_name, manifest.username, manifest.password, ctr, socket
         ):
             pulled += 1
-            logger.info("pull: %s done in %.1fs", manifest.image_name, time.monotonic() - start)
+            logger.info("pulled %s in %.1fs", manifest.image_name, time.monotonic() - start)
         else:
-            logger.warning("pull: failed to pull image for %s/%s", info.name, resource_name)
+            logger.warning("failed to pull image for %s/%s", info.name, resource_name)
     return pulled
 
 
@@ -292,7 +291,7 @@ def _print_summary() -> None:
         images = sum(entry[3] for entry in entries)
         print(
             f"prewire: pre-pulled {len(entries)} charms from bundle {bundle}, "
-            f"pulled {images} images in {_elapsed:.0f}s"
+            f"pulled {images} images (included above)"
         )
         for _, name, channel, count in entries:
             suffix = f" ({channel})" if channel else ""
