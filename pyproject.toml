@@ -1,0 +1,36 @@
+[project]
+name = "jubilant-prewire"
+version = "0.0.1"
+description = "A pytest plugin that pre-pulls OCI images for K8s charm deploys."
+authors = [
+    { name = "Dave Wilding", email = "tech@dpw.me" },
+]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = [
+    "jubilant>=1.8,<2",
+    "pyyaml>=6.0",
+]
+
+[project.entry-points.pytest11]
+prewire = "jubilant_prewire._plugin"
+
+[dependency-groups]
+dev = [
+    "ruff==0.16.5",
+    "ty==0.0.75",
+]
+
+[build-system]
+requires = ["uv_build==0.12.7"]
+build-backend = "uv_build"
+
+[tool.uv]
+exclude-newer = "7 days"
+
+[tool.ruff]
+line-length = 99
+
+[tool.ty.src]
+exclude = []

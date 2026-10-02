@@ -65,13 +65,15 @@ jubilant-prewire assumes concierge has set up the K8s environment.
 
 **containerd socket**: probe candidate sockets and verify each one responds before you use it. Do not assume a single path, and do not let `ctr` fall back to its default silently. The candidates, in order:
 
-1. `/var/snap/k8s/common/run/containerd.sock` (k8s snap, current layout)
+1. `/var/snap/k8s/common/run/containerd.sock` (k8s snap, older layout)
 2. `/var/snap/k8s/current/run/containerd.sock` (k8s snap, older layout)
-3. `/run/containerd/containerd.sock` (standard location)
+3. `/run/containerd/containerd.sock` (standard location; this is where the k8s snap's containerd listens as of v1.32 — validated on a dev VM)
 
 For each candidate, check that the socket exists and that `ctr --address {candidate} -n k8s.io version` succeeds. A socket that exists but does not respond is worse than no socket at all: `ctr` hangs until its context deadline instead of failing fast.
 
-If no candidate responds, print a warning and skip all pulls.
+If no candidate responds directly, retry the probe via `sudo -n` (passwordless sudo). On dev VMs the containerd socket is often `root:root` with mode `srw-rw----`, so a non-root test user gets permission denied — but the same socket responds fine under sudo. When the sudo probe works, all subsequent `ctr` invocations (including image pulls) go through sudo. CI runners run as root and never hit this path.
+
+If no candidate responds even via sudo, print a warning and skip all pulls.
 
 **Namespace**: hardcoded to `k8s.io`.
 
@@ -79,7 +81,9 @@ If no candidate responds, print a warning and skip all pulls.
 
 ### Retry
 
-Retry each pull up to 5 times, waiting 15 seconds between attempts. A full pull of a large image takes minutes: the postgresql-k8s image is ~286 MiB, and it took roughly 3.5 minutes on a GitHub Actions runner at ~890 KiB/s. Retries must tolerate long-running attempts, not just quick failures.
+Retry each pull up to 5 times, waiting 15 seconds between attempts. A full pull of a large image takes minutes: the postgresql-k8s image is ~286 MiB, and it took roughly 3.5 minutes on a GitHub Actions runner at ~890 KiB/s (314 MiB in 198s on a dev VM). Retries must tolerate long-running attempts, not just quick failures.
+
+Charmhub HTTP requests are also retried (5 attempts, 3 seconds apart): the resource manifest endpoint redirects to a CDN that intermittently resets connections. Without HTTP retries, a full cos-lite pre-pull dropped charms at random.
 
 ## Installation
 
@@ -123,14 +127,16 @@ prewire: pre-pulled 4 charms, pulled 4 images in 47s
 For bundles, jubilant-prewire lists each charm it pre-pulled from the bundle:
 
 ```
-prewire: pre-pulled 6 charms from bundle cos-lite, pulled 6 images in 83s
+prewire: pre-pulled 6 charms from bundle cos-lite, pulled 8 images in 1296s
   alertmanager-k8s (1/stable) → 1 image
   catalogue-k8s (1/stable) → 1 image
-  grafana-k8s (1/stable) → 1 image
-  loki-k8s (1/stable) → 1 image
+  grafana-k8s (1/stable) → 2 images
+  loki-k8s (1/stable) → 2 images
   prometheus-k8s (1/stable) → 1 image
   traefik-k8s (latest/stable) → 1 image
 ```
+
+A charm can have more than one oci-image resource (grafana-k8s and loki-k8s each have two), so the image count can exceed the charm count.
 
 ## What jubilant-prewire does NOT do
 
@@ -182,13 +188,16 @@ prewire = "jubilant_prewire._plugin"
 def pytest_configure(config):
     """Install the deploy interception."""
     import jubilant
+
     _original = jubilant.Juju.deploy
     jubilant.Juju.deploy = _patched_deploy
     # Store _original for restoration in pytest_sessionfinish
 
+
 def pytest_sessionfinish(session, exitstatus):
     """Restore the original deploy and print the summary."""
     import jubilant
+
     jubilant.Juju.deploy = _original
     _print_summary()
 ```
@@ -197,7 +206,7 @@ def pytest_sessionfinish(session, exitstatus):
 
 ```python
 def _patched_deploy(self, charm, app=None, **kwargs):
-    _warm(charm, kwargs.get('channel'))
+    _warm(charm, kwargs.get("channel"))
     return _original_deploy(self, charm, app=app, **kwargs)
 ```
 
@@ -210,9 +219,11 @@ def get_charm_info(charm: str, channel: str | None) -> CharmInfo:
     """Query Charmhub for charm info and resources."""
     # GET /v2/charms/info/{charm}?channel={channel}&fields=...
 
+
 def get_bundle_charms(bundle_yaml: str) -> list[CharmRef]:
     """Parse a bundle's YAML manifest to extract charm names and channels."""
     # yaml.safe_load(bundle_yaml) -> applications -> charm, channel
+
 
 def get_oci_image_manifest(charm_id: str, resource_name: str, revision: int) -> ImageManifest:
     """Download the OCI image resource manifest."""
@@ -225,8 +236,10 @@ def get_oci_image_manifest(charm_id: str, resource_name: str, revision: int) -> 
 def find_ctr() -> str | None:
     """Find the ctr binary."""
 
+
 def find_socket(ctr: str) -> str | None:
     """Probe candidate sockets and return the first that responds."""
+
 
 def pull_image(image: str, username: str, password: str, ctr: str, socket: str) -> bool:
     """Pull an image into containerd with retry."""
@@ -328,3 +341,13 @@ The debugging journey that produced the guidance above:
 2. `ctr` silently fell back to `/run/containerd/containerd.sock` and got permission denied, so jubilant-prewire always passes `--address` explicitly.
 3. The snap socket path existed but timed out on dial, so jubilant-prewire probes candidates with `ctr version` and only uses one that responds.
 4. Two of three jobs deployed the charm indirectly and timed out, so the guidance is to pre-pull in every job that deploys the charm.
+
+## Validated on a dev VM (2026-10-03)
+
+The plugin was validated end to end on a Multipass VM (Ubuntu 26.04, k8s snap v1.32.13, Juju 3.6.29, running as a non-root `ubuntu` user):
+
+1. **Discovery**: `find_ctr()` found `/snap/k8s/current/bin/ctr`; the responsive socket was `/run/containerd/containerd.sock` (the standard location — the snap-specific candidates did not exist on this layout).
+2. **Non-root access**: the socket is `root:root srw-rw----`, so direct probes got permission denied; the sudo fallback engaged and pulls worked as the `ubuntu` user.
+3. **Real pull**: postgresql-k8s (314 MiB) pulled in 198s on first pull; a re-pull took 5s thanks to containerd's layer cache.
+4. **Direct deploy e2e**: a pytest session deploying `postgresql-k8s` (14/stable) pre-pulled the image before the deploy, reached `active`, and passed in 206s.
+5. **Bundle e2e**: a pytest session deploying `cos-lite` pre-pulled all 6 charms (8 images, 1296s) before the bundle deploy, all apps reached `active`, and the test passed in 1741s.
