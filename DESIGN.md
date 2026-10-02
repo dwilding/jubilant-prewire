@@ -71,7 +71,7 @@ jubilant-prewire assumes concierge has set up the K8s environment.
 
 For each candidate, check that the socket exists and that `ctr --address {candidate} -n k8s.io version` succeeds. A socket that exists but does not respond is worse than no socket at all: `ctr` hangs until its context deadline instead of failing fast.
 
-If no candidate responds directly, retry the probe via `sudo -n` (passwordless sudo). On dev VMs the containerd socket is often `root:root` with mode `srw-rw----`, so a non-root test user gets permission denied — but the same socket responds fine under sudo. When the sudo probe works, all subsequent `ctr` invocations (including image pulls) go through sudo. CI runners run as root and never hit this path.
+If no candidate responds directly, retry the probe via `sudo -n` (passwordless sudo). The containerd socket is typically `root:root` with mode `srw-rw----`, so a non-root test user gets permission denied — but the same socket responds fine under sudo. When the sudo probe works, all subsequent `ctr` invocations (including image pulls) go through sudo. This path is hit almost everywhere: GitHub Actions runners run tests as the non-root `runner` user, and dev VMs run as a non-root user too. Without the fallback, jubilant-prewire silently skips all pulls.
 
 If no candidate responds even via sudo, print a warning and skip all pulls.
 
@@ -341,6 +341,20 @@ The debugging journey that produced the guidance above:
 2. `ctr` silently fell back to `/run/containerd/containerd.sock` and got permission denied, so jubilant-prewire always passes `--address` explicitly.
 3. The snap socket path existed but timed out on dial, so jubilant-prewire probes candidates with `ctr version` and only uses one that responds.
 4. Two of three jobs deployed the charm indirectly and timed out, so the guidance is to pre-pull in every job that deploys the charm.
+
+## Validated in CI (2026-10-03)
+
+The plugin (installed as a git dependency) ran in all five k8s example jobs of the operator repo's example-charm-integration-tests workflow, on real GitHub Actions runners. All five passed:
+
+- k8s-1-minimal and k8s-2-configurable deploy only local charms; jubilant-prewire correctly did nothing.
+- k8s-3-postgresql and k8s-4-action deploy postgresql-k8s from Charmhub; the image was pre-pulled (318s and 220s) before the deploy, and both suites passed well inside the 180-second `juju.wait()` timeout.
+- k8s-5-observe deploys postgresql-k8s and the cos-lite bundle; all 8 images were pre-pulled (462s + 714s) before the bundle deploy, and the suite passed.
+
+Key findings from the run logs:
+
+1. **The sudo fallback is required on CI, not just dev VMs.** GitHub Actions runners run tests as the non-root `runner` user, so the direct socket probe gets permission denied on every pulling job; the sudo fallback engaged each time. Without it, jubilant-prewire would have been a silent no-op on CI.
+2. **Bundle pulls are sequential and dominate runtime.** The 8 cos-lite images pulled one at a time took 714s of a 1714s job — 42% of the job's time. Parallelizing pulls is the main performance opportunity.
+3. **The live socket on the runners was `/run/containerd/containerd.sock`** (the standard location); the snap-specific candidates did not exist, matching the dev VM finding.
 
 ## Validated on a dev VM (2026-10-03)
 
