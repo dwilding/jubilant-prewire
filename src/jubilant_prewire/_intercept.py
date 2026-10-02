@@ -162,7 +162,6 @@ def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
     and sequential pulls dominated job runtime in CI validation (the 8
     cos-lite images took 714s of a 1714s job).
     """
-    global _elapsed
     if not info.bundle_yaml:
         logger.warning("bundle %s has no bundle-yaml; skipping", bundle)
         return
@@ -201,9 +200,9 @@ def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
                     _bundle_pulls.append((bundle, charm_name, ref.channel, pulled))
             except Exception as exc:  # noqa: BLE001 -- best-effort: never break the deploy
                 logger.warning("bundle %s: failed to pre-pull %s: %s", bundle, ref.name, exc)
-    # Add the bundle's wall time once; per-charm elapsed times overlap when
-    # pulled in parallel, so summing them would double-count.
-    _elapsed += time.monotonic() - start
+    # Note: the bundle's wall time is added to _elapsed by _warm's finally
+    # block, which covers this whole call; adding it here too would
+    # double-count.
     logger.info(
         "bundle %s: %d charm(s) pulled in %.1fs",
         bundle,

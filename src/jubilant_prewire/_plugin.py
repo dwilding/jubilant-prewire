@@ -36,13 +36,17 @@ def pytest_configure(config):
 
 
 def _live_logging_enabled(config) -> bool:
-    """Return True if pytest's live logging will already show prewire records."""
+    """Return True if pytest's live logging will already show prewire records.
+
+    Live logging is on only when ``log_cli`` is set (to any value, including
+    explicitly false) or the ``--log-cli-level`` CLI flag is passed. Setting
+    ``log_cli_level`` alone does NOT enable live logging — it only sets the
+    level used *if* live logging is otherwise enabled.
+    """
     try:
         if config.getini("log_cli"):
             return True
         if config.getoption("log_cli_level", None):
-            return True
-        if config.getini("log_cli_level"):
             return True
     except ValueError:
         # Unregistered ini names (very old pytest); assume live logging is off.
