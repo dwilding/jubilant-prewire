@@ -61,6 +61,8 @@ Both calls use `urllib.request` from the standard library.
 
 jubilant-prewire assumes concierge has set up the K8s environment.
 
+**jjx detection**: before any discovery, jubilant-prewire checks whether the tests are running under [jjx](https://github.com/dwilding/jjx), the Docker-based Juju runtime. jjx is a valid environment for running charm integration tests, and under it the pre-pull is not just useless but harmful: jjx deploys Docker containers (pulling images itself, instantly), so a pre-pull would block each deploy for minutes pulling images into a containerd that jjx's workloads never use. Because jubilant-prewire is the component monkey-patching `deploy`, it is jubilant-prewire's responsibility to act gracefully in every valid test environment. Detection: jjx installs a `juju` shim that is a generated Python console script importing the `jjx` package; the real Juju CLI is a compiled Go binary. If the `juju` on PATH is a script whose first bytes reference jjx, skip all pre-pulls with a single info log.
+
 **ctr binary**: try `/snap/k8s/current/bin/ctr`, then `which ctr`. If you find neither, print a warning and skip all pulls. The tests still run — jubilant-prewire is best-effort.
 
 **containerd socket**: probe candidate sockets and verify each one responds before you use it. Do not assume a single path, and do not let `ctr` fall back to its default silently. The candidates, in order:
@@ -72,8 +74,6 @@ jubilant-prewire assumes concierge has set up the K8s environment.
 For each candidate, check that the socket exists and that `ctr --address {candidate} -n k8s.io version` succeeds. A socket that exists but does not respond is worse than no socket at all: `ctr` hangs until its context deadline instead of failing fast.
 
 All probes and pulls go through `sudo -n` (passwordless sudo). The containerd socket is `root:root` with mode `srw-rw----` in every supported environment — GitHub Actions runners, Multipass, and LXD VMs all run tests as a non-root user — so a direct probe gets permission denied everywhere that matters. Root environments (e.g. containers without sudo) are not supported. If sudo is unavailable or no candidate responds, print a warning and skip all pulls.
-
-If no candidate responds even via sudo, print a warning and skip all pulls.
 
 **Namespace**: hardcoded to `k8s.io`.
 

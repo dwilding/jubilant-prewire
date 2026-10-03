@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -133,13 +134,15 @@ def _warm(charm: object, channel: str | None) -> None:
 
 def _discover() -> bool:
     """Find ctr and a responsive containerd socket; True if both are found.
-
     Discovery runs once per session; afterwards the cached result is returned.
     """
     global _ctr, _socket, _discovered
     if _discovered:
         return _ctr is not None and _socket is not None
     _discovered = True
+    if _jjx_active():
+        logger.info("jjx runtime detected; skipping image pre-pulls (jjx deploys via Docker)")
+        return False
     logger.debug("discover: finding ctr binary (candidates: %s)", _containerd._CTR_CANDIDATES)
     _ctr = _containerd.find_ctr()
     if _ctr is None:
@@ -153,6 +156,27 @@ def _discover() -> bool:
         return False
     logger.info("using ctr %s, socket %s (via sudo)", _ctr, _socket)
     return True
+
+
+def _jjx_active() -> bool:
+    """Return True if the tests are running under the jjx runtime.
+
+    jjx replaces the Juju CLI with a shim that deploys Docker containers
+    instead of real K8s workloads. Under jjx, image pre-pulls are useless
+    (jjx pulls Docker images itself, instantly) and would only add delay
+    before each deploy. Detect it by the ``juju`` shim jjx installs: it is
+    a generated Python console script whose shebang imports the ``jjx``
+    package. The real Juju CLI is a compiled Go binary that never matches.
+    """
+    juju = shutil.which("juju")
+    if juju is None:
+        return False
+    try:
+        with open(juju, encoding="utf-8", errors="replace") as f:
+            head = f.read(200)
+    except OSError:
+        return False
+    return head.startswith("#!") and "jjx" in head
 
 
 def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
