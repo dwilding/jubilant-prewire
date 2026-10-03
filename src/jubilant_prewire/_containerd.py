@@ -39,6 +39,13 @@ _PULL_RETRY_DELAY = 15
 # quickly; a dead socket burns the whole timeout.
 _PROBE_TIMEOUT = 10
 
+# Per-attempt cap on a single pull, as a backstop against a stalled pull
+# (network hang rather than failure). Real pulls took up to 462s in CI, so
+# 20 minutes never cuts off a legitimate slow pull — but without a cap, a
+# stalled pull would block the deploy call forever, which is worse than
+# the 180s juju.wait() timeout jubilant-prewire exists to avoid.
+_PULL_TIMEOUT = 20 * 60
+
 
 def find_ctr() -> str | None:
     """Find the ctr binary: k8s snap path first, then PATH."""
@@ -128,7 +135,20 @@ def pull_image(image: str, username: str, password: str, ctr: str, socket: str) 
     logger.debug("ctr: running %s", " ".join(redacted))
     for attempt in range(1, _PULL_ATTEMPTS + 1):
         try:
-            result = subprocess.run(command, capture_output=True, check=False)
+            result = subprocess.run(
+                command, capture_output=True, check=False, timeout=_PULL_TIMEOUT
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "ctr: pull attempt %d/%d for %s timed out after %ds",
+                attempt,
+                _PULL_ATTEMPTS,
+                image,
+                _PULL_TIMEOUT,
+            )
+            if attempt < _PULL_ATTEMPTS:
+                time.sleep(_PULL_RETRY_DELAY)
+            continue
         except OSError as exc:
             # Transient spawn failures (e.g. fork under load) are retried
             # like any other pull failure.

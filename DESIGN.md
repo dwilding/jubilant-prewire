@@ -83,6 +83,8 @@ All probes and pulls go through `sudo -n` (passwordless sudo). The containerd so
 
 Retry each pull up to 5 times, waiting 15 seconds between attempts. A full pull of a large image takes minutes: the postgresql-k8s image is ~286 MiB, and it took roughly 3.5 minutes on a GitHub Actions runner at ~890 KiB/s (314 MiB in 198s on a dev VM). Retries must tolerate long-running attempts, not just quick failures.
 
+Each attempt is capped at 20 minutes, as a backstop against a stalled pull (a network hang rather than a failure). Real pulls took up to 462s in CI, so the cap never cuts off a legitimate slow pull — but without it, a stalled pull would block the deploy call forever, which is worse than the 180-second `juju.wait()` timeout jubilant-prewire exists to avoid. A timed-out attempt is retried like any other failure.
+
 Charmhub HTTP requests are also retried (5 attempts, 3 seconds apart): the resource manifest endpoint redirects to a CDN that intermittently resets connections. Without HTTP retries, a full cos-lite pre-pull dropped charms at random.
 
 ## Installation
