@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -141,7 +140,7 @@ def _discover() -> bool:
         return _ctr is not None and _socket is not None
     _discovered = True
     if _jjx_active():
-        logger.info("jjx runtime detected; skipping image pre-pulls (jjx deploys via Docker)")
+        logger.info("jjx runtime detected; skipping image pre-pulls")
         return False
     logger.debug("discover: finding ctr binary (candidates: %s)", _containerd._CTR_CANDIDATES)
     _ctr = _containerd.find_ctr()
@@ -161,22 +160,21 @@ def _discover() -> bool:
 def _jjx_active() -> bool:
     """Return True if the tests are running under the jjx runtime.
 
-    jjx replaces the Juju CLI with a shim that deploys Docker containers
-    instead of real K8s workloads. Under jjx, image pre-pulls are useless
-    (jjx pulls Docker images itself, instantly) and would only add delay
-    before each deploy. Detect it by the ``juju`` shim jjx installs: it is
-    a generated Python console script whose shebang imports the ``jjx``
-    package. The real Juju CLI is a compiled Go binary that never matches.
+    jjx is a Docker-based Juju runtime: it is a valid environment for
+    running charm integration tests, but its deploys don't use containerd,
+    so image pre-pulls would only add delay before each deploy. jjx
+    identifies itself in the Juju version string (its release marker is
+    ``jjx``, e.g. ``4.0.14-jjx-amd64``), which jubilant's ``version()``
+    parses into the ``release`` field. Because jubilant-prewire is the
+    component monkey-patching ``deploy``, it is jubilant-prewire's
+    responsibility to act gracefully in every valid test environment.
     """
-    juju = shutil.which("juju")
-    if juju is None:
-        return False
     try:
-        with open(juju, encoding="utf-8", errors="replace") as f:
-            head = f.read(200)
-    except OSError:
+        import jubilant
+
+        return jubilant.Juju().version().release == "jjx"
+    except Exception:  # noqa: BLE001 -- best-effort: treat as not jjx
         return False
-    return head.startswith("#!") and "jjx" in head
 
 
 def _warm_bundle(bundle: str, info: _charmhub.CharmInfo) -> None:
