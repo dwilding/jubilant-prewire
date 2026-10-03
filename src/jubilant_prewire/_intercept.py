@@ -290,7 +290,7 @@ def _print_summary() -> None:
         images = sum(entry[3] for entry in entries)
         print(
             f"prewire: pre-pulled {len(entries)} charms from bundle {bundle}, "
-            f"pulled {images} images (included above)"
+            f"pulled {images} images (time included above)"
         )
         for _, name, channel, count in entries:
             suffix = f" ({channel})" if channel else ""
