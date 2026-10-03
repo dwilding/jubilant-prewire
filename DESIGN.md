@@ -26,12 +26,12 @@ This classification is 100% accurate. Unlike static AST analysis, the runtime ha
 For each Charmhub charm, jubilant-prewire:
 
 1. Queries Charmhub for the charm's default-release resources on the specified channel (or the default channel if none is specified).
-2. Checks the `type` field. If it is `bundle`, jubilant-prewire parses the `bundle-yaml` from the response to extract the charm names and channels of every charm in the bundle, then pre-pulls each one. If it is `charm`, continues.
+2. Checks the `type` field. If it is `bundle`, jubilant-prewire parses the `bundle-yaml` from the response to extract the charm names and channels of every charm in the bundle, then pre-pulls each one — in parallel, four charms at a time (a bundle's images are independent, and sequential pulls dominated job runtime in CI validation). If it is `charm`, continues.
 3. Filters for `type: oci-image` resources. Charms with no OCI image resources are skipped silently.
 4. Downloads each OCI image resource manifest, which contains the image reference (`ImageName`) and temporary registry credentials (`Username`, `Password`).
 5. Pulls the image into containerd using `ctr`:
    ```
-   ctr --address {socket} -n k8s.io image pull --user {username}:{password} {image_name}
+   sudo -n -- ctr --address {socket} -n k8s.io image pull --user {username}:{password} {image_name}
    ```
 6. Records the charm as pre-pulled so subsequent deploys of the same charm skip the pull.
 
@@ -124,10 +124,12 @@ prewire: pre-pulled 4 charms, pulled 4 images in 47s
   any-charm (latest/edge) → 1 image
 ```
 
-For bundles, jubilant-prewire lists each charm it pre-pulled from the bundle:
+For bundles, jubilant-prewire lists each charm it pre-pulled from the bundle (the pull time is already included in the line above):
 
 ```
-prewire: pre-pulled 6 charms from bundle cos-lite, pulled 8 images in 1296s
+prewire: pre-pulled 1 charms, pulled 1 images in 591s
+  postgresql-k8s (14/stable) → 1 image
+prewire: pre-pulled 6 charms from bundle cos-lite, pulled 8 images (time included above)
   alertmanager-k8s (1/stable) → 1 image
   catalogue-k8s (1/stable) → 1 image
   grafana-k8s (1/stable) → 2 images
@@ -166,13 +168,9 @@ jubilant-prewire/
   src/jubilant_prewire/
     __init__.py
     _plugin.py        # pytest hooks: pytest_configure, pytest_sessionfinish
-    _intercept.py     # deploy interception and charm classification
+    _intercept.py     # deploy interception, charm classification, jjx detection
     _charmhub.py      # Charmhub API client
     _containerd.py    # ctr discovery, socket probing, image pull with retry
-  tests/
-    test_intercept.py
-    test_charmhub.py
-    test_containerd.py
 ```
 
 ### Entry point
@@ -238,22 +236,17 @@ def find_ctr() -> str | None:
 
 
 def find_socket(ctr: str) -> str | None:
-    """Probe candidate sockets and return the first that responds."""
+    """Probe candidate sockets via sudo and return the first that responds."""
 
 
 def pull_image(image: str, username: str, password: str, ctr: str, socket: str) -> bool:
-    """Pull an image into containerd with retry."""
-    # ctr --address {socket} -n k8s.io image pull --user {user}:{pass} {image}
+    """Pull an image into containerd with retry, via sudo."""
+    # sudo -n -- ctr --address {socket} -n k8s.io image pull --user {user}:{pass} {image}
 ```
 
 ### Testing
 
-Unit tests for:
-- Charm classification (feed in various argument types, check classification)
-- Charmhub API response parsing (mocked HTTP responses)
-- ctr discovery and socket probing (mocked filesystem and subprocess)
-
-No integration tests are needed for the initial version. The real Charmhub API and containerd are tested by running jubilant-prewire in CI.
+No unit tests yet. The plugin has been validated end-to-end: real Charmhub API and containerd on a dev VM, real GitHub Actions runners in CI (twice), and under the jjx runtime. Unit tests for classification, Charmhub parsing, and socket probing (mocked) are the main remaining gap.
 
 ## Reference
 
@@ -331,6 +324,18 @@ If jubilant is not installed (the user added jubilant-prewire to dependencies bu
 
 jubilant-prewire patches `jubilant.Juju.deploy` at the class level, so all `Juju` instances share the same patched method. The `_warmed` set is module-level and not protected by a lock. This is safe because integration tests run sequentially by default — a scan of ~600 charm repos found none that use pytest-xdist for integration tests. If parallel integration tests become common later, a lock would be needed.
 
+Bundle pre-pulls do use a thread pool (four workers) — pulls are subprocess- and network-bound, so threads release the GIL while waiting. The pool is safe with the sequential-test assumption: `_warmed` and the summary lists are only mutated from the main thread (workers return results; the main thread aggregates them), so no lock is needed.
+
+### Logging
+
+jubilant-prewire logs through the `prewire` logger, defaulted to INFO so its progress is visible without any pytest logging configuration. Levels:
+
+- **INFO**: real progress — pre-pull starts, discovery results, pull starts/finishes with timing, bundle composition and completion.
+- **DEBUG**: decision detail — classification choices, socket probing, the exact `ctr` command (with credentials redacted), charm info dumps.
+- **WARNING**: failures only.
+
+When pytest's live logging is active (e.g. `--log-cli-level=INFO`), records flow through pytest's handlers; otherwise a stdout handler is installed so the logs still appear. Credentials never appear in logs — the `--user` value is redacted to `<credentials>`.
+
 ## Validated in CI (2026-09-24)
 
 The pre-pull approach was validated end to end in the `canonical/operator` repository (workflow: `example-charm-integration-tests.yaml`, branch `try-cached-postgres`). Three jobs each pre-pulled the postgresql-k8s image before running integration tests. All three passed after previously failing with 180-second `juju.wait()` timeouts. With the image cached, the postgres deploy went from pod-scheduled to `active` in roughly 55 seconds, and the test suite completed in 178 seconds.
@@ -355,6 +360,18 @@ Key findings from the run logs:
 1. **The sudo fallback is required on CI, not just dev VMs.** GitHub Actions runners run tests as the non-root `runner` user, so the direct socket probe gets permission denied on every pulling job; the sudo fallback engaged each time. Without it, jubilant-prewire would have been a silent no-op on CI.
 2. **Bundle pulls are sequential and dominate runtime.** The 8 cos-lite images pulled one at a time took 714s of a 1714s job — 42% of the job's time. Parallelizing pulls is the main performance opportunity.
 3. **The live socket on the runners was `/run/containerd/containerd.sock`** (the standard location); the snap-specific candidates did not exist, matching the dev VM finding.
+
+## Validated in CI (2026-10-03, second trial)
+
+After parallel bundle pulls, sudo-only discovery, and rebalanced logging landed, the same five jobs ran again. All five passed:
+
+- **Parallel pulls delivered**: the cos-lite bundle phase dropped from 714s to 219s (3.3×) — the six charms pulled concurrently, with the critical path (prometheus starting after a worker freed, 162s) exactly matching the 219s wall time. The k8s-5 job's total dropped from 28:34 to 17:41.
+- **Timing is honest**: the k8s-5 summary reported 591s — exactly postgres (370.7s) + bundle (219.8s), with no double-counting.
+- **Logs are lean**: k8s-3 produced 9 prewire INFO lines (previously dozens), with zero duplication and zero warnings.
+
+## Validated under jjx (2026-10-03)
+
+The k8s-3 example charm (which deploys postgresql-k8s from Charmhub) ran under [jjx](https://github.com/dwilding/jjx), the Docker-based Juju runtime, with jubilant-prewire installed. All 3 tests passed in 27s. jubilant-prewire detected the jjx runtime via the version marker and skipped all pre-pulls with a single info log — no delay added, no warnings, no interference with jjx's virtual-charm deploys.
 
 ## Validated on a dev VM (2026-10-03)
 
