@@ -4,7 +4,9 @@ jubilant-prewire is an **experimental** plugin for [Juju charm](https://canonica
 
 ![juju.deploy() in an integration test](editor.svg)
 
-To use jubilant-prewire, add it as an integration testing dependency of your charm:
+## Usage
+
+Add jubilant-prewire as an integration testing dependency of your charm:
 
 ```text
 uv add --group integration git+https://github.com/dwilding/jubilant-prewire@main
