@@ -1,6 +1,6 @@
 [project]
 name = "jubilant-prewire"
-version = "0.0.1"
+version = "0.1.0.dev0"
 description = "A pytest plugin that pre-pulls OCI images for K8s charm deploys."
 authors = [
     { name = "Dave Wilding", email = "tech@dpw.me" },
@@ -20,10 +20,13 @@ prewire = "jubilant_prewire._plugin"
 dev = [
     "ruff==0.16.5",
     "ty==0.0.75",
+    "zizmor==1.31.1; python_version >= '3.11'",
 ]
 
 [build-system]
-requires = ["uv_build==0.12.7"]
+requires = [
+    "uv_build==0.12.7"
+]
 build-backend = "uv_build"
 
 [tool.uv]
@@ -31,6 +34,3 @@ exclude-newer = "7 days"
 
 [tool.ruff]
 line-length = 99
-
-[tool.ty.src]
-exclude = []

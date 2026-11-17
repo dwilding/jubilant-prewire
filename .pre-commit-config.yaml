@@ -1,0 +1,30 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+  - repo: local
+    hooks:
+      - id: deps
+        name: Check uv.lock
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: zizmor
+        name: Run zizmor
+        entry: uv run zizmor .
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: just-lint
+        name: Run 'just lint'
+        entry: uvx --from rust-just@1.59.0 just lint
+        language: system
+        pass_filenames: false
+        always_run: true
