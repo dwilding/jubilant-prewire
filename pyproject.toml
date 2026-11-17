@@ -1,6 +1,6 @@
 [project]
 name = "jubilant-prewire"
-version = "0.1.0.dev0"
+version = "0.1.0.dev1"
 description = "A pytest plugin that pre-pulls OCI images for K8s charm deploys."
 authors = [
     { name = "Dave Wilding", email = "tech@dpw.me" },
